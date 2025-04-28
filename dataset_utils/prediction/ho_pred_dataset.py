@@ -73,6 +73,12 @@ class HO_Pre(SpatioTemporalDataset):
         self._sc = tnx.SimplicialComplex(self.nodes + list(edge_set) + self.triangles)
         return self._sc
     
+    def inter_order_rw_matrix(self):
+        total_size = self.L0.shape[0] + self.L1.shape[0] + self.L2.shape[0]
+        block_matrix = torch.zeros(total_size, total_size)
+        
+        pass
+    
     def _compute_incident_matrices(self):
         """compute incident matrices."""
         sc = self.simplicial_complex  # Use the property

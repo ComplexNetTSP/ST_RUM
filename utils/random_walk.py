@@ -2,7 +2,7 @@ import torch
 from torch_cluster import random_walk
 
 
-def uniform_random_walk(edge_index, nodes, num_samples, length):
+def uniform_random_walk(edge_index, nodes, batch_size, num_samples, length):
     """
     Random walk on a graph.
 
@@ -22,7 +22,7 @@ def uniform_random_walk(edge_index, nodes, num_samples, length):
     source, target = edge_index[0], edge_index[1]
     
     num_nodes = len(nodes)
-    nodes = nodes.repeat(num_samples)
+    nodes = nodes.repeat(batch_size * num_samples)
 
     walks, eids = random_walk(row=source,
                               col=target,
@@ -30,8 +30,8 @@ def uniform_random_walk(edge_index, nodes, num_samples, length):
                               walk_length=length,
                               return_edge_indices = True)
     
-    walks = walks.view(num_samples, num_nodes, length+1)
-    eids = eids.view(num_samples, num_nodes, length)
+    walks = walks.view(batch_size, num_samples, num_nodes, length+1)
+    eids = eids.view(batch_size, num_samples, num_nodes, length)
     
     return walks, eids
 
