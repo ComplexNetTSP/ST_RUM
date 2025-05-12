@@ -11,6 +11,8 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 import torch
 
+from tsl.nn.models import GraphWaveNetModel, DCRNNModel
+
 def run_experiment():
     
     seed_everything(42)

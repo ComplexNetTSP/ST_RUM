@@ -78,3 +78,38 @@ python run.py
     <td>1558.18</td>
   </tr>
 </table>
+
+
+
+## Experiment results with Graph Structure
+<table>
+  <tr>
+    <th>Model</th>
+    <th colspan="2" align="center">Metr LA</th>
+  </tr>
+  <tr>
+    <th></th>
+    <th>MAE</th>
+    <th>MSE</th>
+  </tr>
+  <tr>
+    <td>Ours(Nodes + Edges)</td>
+    <td>3.89</td>
+    <td>60.91</td>
+  </tr>
+  <tr>
+    <td>Ours(Directed Graph)</td>
+    <td>3.81</td>
+    <td>59.16</td>
+  </tr>
+  <tr>
+    <td>Ours(Undirected Graph)</td>
+    <td>3.82</td>
+    <td>59.66</td>
+  </tr>
+</table>
+
+<figure>
+  <img src="image/learning_curve.png" alt="Alt text" width="300">
+  <figcaption>Training Learning curve</figcaption>
+</figure>
