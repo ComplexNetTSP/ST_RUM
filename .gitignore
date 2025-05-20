@@ -12,4 +12,5 @@ logs/*
 
 # Model checkpoints
 model_checkpoint/
+model_checkpoints/
 model_checkpoint/*
