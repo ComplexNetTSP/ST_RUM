@@ -1,4 +1,4 @@
-from tsl.data import SpatioTemporalDataset
+from tsl.data import ImputationDataset
 import numpy as np
 import pandas as pd
 import toponetx as tnx
@@ -12,7 +12,6 @@ import torch
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from scipy.spatial import Delaunay
 from scipy.spatial.distance import pdist, squareform
-from tsl.ops.connectivity import asymmetric_norm
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -26,7 +25,6 @@ def find_cliques_size_k(G, k):
             for mini_clique in itertools.combinations(clique, k):
                 all_cliques.add(tuple(sorted(mini_clique)))
     return list(all_cliques)
-
 
 
 def prepare_high_order_feature(points, coord_type='relative', mode='delaunay', edge_index=None, triangles=None):
@@ -129,20 +127,19 @@ def prepare_high_order_feature(points, coord_type='relative', mode='delaunay', e
         triangle_dict[triangle] = {"triangle_features": float(area)}
     
     return edge_dict, triangle_dict
-# Compact version - imports and helper functions removed for brevity
-# Compact version - imports and helper functions removed for brevity
 
-# Compact version - imports and helper functions removed for brevity
 
-class HO_Pre(SpatioTemporalDataset):
+class HO_Imp(ImputationDataset):
+    """Higher-Order Imputation Dataset - extends ImputationDataset with higher-order adjacency matrices"""
+    
     def __init__(self, 
                  target,
+                 eval_mask,
                  mask=None,
                  connectivity=None,
                  covariates=None,
                  scalers=None,
                  window=24,
-                 horizon=2,
                  stride=1,
                  sparse=True,
                  signed=False,
@@ -159,12 +156,12 @@ class HO_Pre(SpatioTemporalDataset):
                  *args, **kwargs):
         
         super().__init__(target=target,
+                        eval_mask=eval_mask,
                         mask=mask,
                         connectivity=connectivity,
                         covariates=covariates,
                         scalers=scalers,
                         window=window,
-                        horizon=horizon,
                         stride=stride,
                         *args, **kwargs)
         
@@ -264,7 +261,15 @@ class HO_Pre(SpatioTemporalDataset):
         edge_features = torch.tensor(np.array(list(sc.get_simplex_attributes("edge_features").values())))
         
         L0 = torch.tensor(sc.adjacency_matrix(rank=0, signed=self.signed).todense().A, dtype=torch.float)
-        L1 = torch.tensor(sc.coadjacency_matrix(rank=1, signed=self.signed).todense().A, dtype=torch.float)
+        
+        # For order=1, use coadjacency_matrix which handles edge-to-edge connections better
+        try:
+            L1 = torch.tensor(sc.coadjacency_matrix(rank=1, signed=self.signed).todense().A, dtype=torch.float)
+        except ValueError:
+            # If no edge-to-edge connections exist, create zero matrix
+            num_edges = len(list(sc.skeleton(1))) - len(list(sc.skeleton(0)))  # edges only
+            L1 = torch.zeros(num_edges, num_edges, dtype=torch.float)
+        
         B1 = torch.tensor(sc.incidence_matrix(rank=1, signed=self.signed).todense().A, dtype=torch.float)
         
         # Build block matrix

@@ -14,3 +14,5 @@ logs/*
 model_checkpoint/
 model_checkpoints/
 model_checkpoint/*
+
+optuna_results/
