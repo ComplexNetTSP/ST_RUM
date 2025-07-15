@@ -1,0 +1,10 @@
+einops==0.8.1
+networkx==3.4.2
+numpy==2.2.5
+pytorch_lightning==2.4.0
+TopoNetX==0.1.1
+torch==2.4.1+cu121
+torch_cluster==1.6.3+pt24cu121
+torch_geometric==2.6.1
+torch_sparse==0.6.18+pt24cu121
+torch_spatiotemporal==0.9.5

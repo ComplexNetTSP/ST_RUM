@@ -1,0 +1,33 @@
+# Jupyter notebook checkpoints
+*.ipynb
+.ipynb_checkpoints/
+ipynb_checkpoints/
+
+# Data directories
+data/
+data/*
+image/
+image/*
+
+# Log files
+logs/
+logs/*
+
+# Model checkpoints
+checkpoints
+model_checkpoint/
+model_checkpoints/
+model_checkpoint/*
+sensitive_analysis_checkpoint/
+sensitive_analysis_checkpoint/*
+tunner_checkpoint/
+tunner_checkpoint/*
+
+
+optuna_results/
+sensitivity_analysis_results/*
+
+
+
+run.py
+*.pdf
