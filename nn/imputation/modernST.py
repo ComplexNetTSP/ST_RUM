@@ -76,10 +76,11 @@ class ModernSTImpute(nn.Module):
         self.head = nn.Sequential(
             nn.Linear(self.total_features * hidden_size, ff_size),
             get_layer_activation(activation)(),
+            nn.Dropout(dropout),
             nn.Linear(ff_size, input_size)
         )
         
-        self.reset_parameters()
+        # self.reset_parameters()
 
     def reset_parameters(self):
         """Initialize model parameters"""
@@ -232,7 +233,7 @@ class ModernSTImpute(nn.Module):
         )  # (batch, samples, time, nodes, length)
         
         # Compute uniqueness features
-        uniqueness_scores = uniqueness(walks).flip(-1)
+        uniqueness_scores = uniqueness(walks)#.flip(-1)
         uniqueness_scores = uniqueness_scores / uniqueness_scores.shape[-1] * 2 * math.pi
         uniqueness_features = torch.cat([
             uniqueness_scores.sin().unsqueeze(-1),
@@ -240,8 +241,8 @@ class ModernSTImpute(nn.Module):
         ], dim=-1)
         
         # Gather features and masks along walks
-        gathered_features = self._gather_walk_features(x_concat, walks.flip(-1))
-        gathered_masks = self._gather_walk_masks(mask_concat, walks.flip(-1))
+        gathered_features = self._gather_walk_features(x_concat, walks)#.flip(-1)
+        gathered_masks = self._gather_walk_masks(mask_concat, walks)#.flip(-1)
         
         # Combine features and masks with uniqueness features
         # Concatenate features and masks

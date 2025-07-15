@@ -13,6 +13,7 @@ from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from scipy.spatial import Delaunay
 from scipy.spatial.distance import pdist, squareform
 from tsl.ops.connectivity import asymmetric_norm
+from torch_geometric.utils.undirected import is_undirected
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -129,10 +130,6 @@ def prepare_high_order_feature(points, coord_type='relative', mode='delaunay', e
         triangle_dict[triangle] = {"triangle_features": float(area)}
     
     return edge_dict, triangle_dict
-# Compact version - imports and helper functions removed for brevity
-# Compact version - imports and helper functions removed for brevity
-
-# Compact version - imports and helper functions removed for brevity
 
 class HO_Pre(SpatioTemporalDataset):
     def __init__(self, 
@@ -151,8 +148,6 @@ class HO_Pre(SpatioTemporalDataset):
                  bias=True,  # Bias or unbias random walk
                  norm='row',  # 'row', 'col', or None for normalization
                  # New hyperparameters for weighting
-                 alpha=0.5,  # Weight for diagonal vs off-diagonal in first row/col
-                 beta=0.5,   # Weight for B1T vs L1 in order=1, or B1T vs (L1+B2) in order=2
                  points=None,  # Coordinate points for Delaunay or geographic features
                  coord_type='relative',  # 'relative' or 'geographic'
                  use_delaunay=False,  # Use Delaunay triangulation instead of clique finding
@@ -174,12 +169,19 @@ class HO_Pre(SpatioTemporalDataset):
         self.diagonal = diagonal
         self.bias = bias
         self.norm = norm
-        self.alpha = alpha
-        self.beta = beta
         self.points = points
         self.coord_type = coord_type
         self.use_delaunay = use_delaunay
         self.rw_matrices = self.inter_order_rw_matrix()
+        # Print dataset statistics
+        print(f"Dataset created: {self.n_nodes} nodes", end="")
+        if self.order >= 1:
+            num_edges = self.edge_index.shape[1] if hasattr(self, 'edge_index') else len(self.graph.edges)
+            print(f", {num_edges} edges", end="")
+        if self.order >= 2:
+            print(f", {len(self.triangles)} triangles")
+        else:
+            print()  # New line
     
     @property
     def graph(self):
@@ -270,15 +272,21 @@ class HO_Pre(SpatioTemporalDataset):
         # Build block matrix
         total_size = L0.shape[0] + L1.shape[0]
         block_matrix = torch.zeros(total_size, total_size)
-        
         if self.bias:
+            
             # Weighted blocks for biased walk
             if self.diagonal:
-                block_matrix[:L0.shape[0], :L0.shape[0]] = self.alpha * L0
-                block_matrix[L0.shape[0]:, L0.shape[0]:] = (1 - self.beta) * L1
-            
-            block_matrix[:L0.shape[0], L0.shape[0]:] = (1 - self.alpha) * B1
-            block_matrix[L0.shape[0]:, :L0.shape[0]] = self.beta * B1.T
+                # [[α*L0, (1-α)*B1],
+                # [β*B1T, (1-β)*L1]]
+                block_matrix[:L0.shape[0], :L0.shape[0]] = (1/L0.shape[0])/(1/L0.shape[0] + 1/L1.shape[0]) * L0
+                block_matrix[L0.shape[0]:, L0.shape[0]:] = (1/L1.shape[0])/(1/L0.shape[0] + 1/L1.shape[0]) * L1
+                block_matrix[:L0.shape[0], L0.shape[0]:] = (1/L1.shape[0])/(1/L0.shape[0] + 1/L1.shape[0]) * B1
+                block_matrix[L0.shape[0]:, :L0.shape[0]] = (1/L0.shape[0])/(1/L0.shape[0] + 1/L1.shape[0]) * B1.T
+            else:
+                # [[0, B1],
+                # [B1T, 0]]   
+                block_matrix[:L0.shape[0], L0.shape[0]:] = B1
+                block_matrix[L0.shape[0]:, :L0.shape[0]] = B1.T
         else:
             # Unweighted blocks for unbiased walk
             if self.diagonal:
@@ -356,16 +364,24 @@ class HO_Pre(SpatioTemporalDataset):
         n0, n1 = L0.shape[0], L1.shape[0]
         
         if self.bias:
-            # Weighted blocks for biased walk
+            # [[α*L0, (1-α)*B1, 0], 
+            # [β*B1T, (1-β)/2*L1, (1-β)/2*B2], 
+            # [0, 0.5*B2T, 0.5*L2]]
+            # Weighted blocks for biased walk            
             if self.diagonal:
-                block_matrix[:n0, :n0] = self.alpha * L0
-                block_matrix[n0:n0+n1, n0:n0+n1] = (1 - self.beta) / 2 * L1
-                block_matrix[n0+n1:, n0+n1:] = 0.5 * L2
-            
-            block_matrix[:n0, n0:n0+n1] = (1 - self.alpha) * B1
-            block_matrix[n0:n0+n1, :n0] = self.beta * B1.T
-            block_matrix[n0:n0+n1, n0+n1:] = (1 - self.beta) / 2 * B2
-            block_matrix[n0+n1:, n0:n0+n1] = 0.5 * B2.T
+                block_matrix[:n0, :n0] = (1/L0.shape[0])/(1/L0.shape[0] + 1/L1.shape[0]) * L0
+                block_matrix[n0:n0+n1, n0:n0+n1] = (1/L1.shape[0])/(1/L0.shape[0] + 1/L1.shape[0] + 1/L2.shape[0]) * L1
+                block_matrix[n0+n1:, n0+n1:] = (1/L2.shape[0])/(1/L1.shape[0] + 1/L2.shape[0]) * L2
+
+                block_matrix[:n0, n0:n0+n1] = (1/L1.shape[0])/(1/L0.shape[0] + 1/L1.shape[0]) * B1
+                block_matrix[n0:n0+n1, :n0] = (1/L0.shape[0])/(1/L0.shape[0] + 1/L1.shape[0] + 1/L2.shape[0]) * B1.T
+                block_matrix[n0:n0+n1, n0+n1:] = (1/L2.shape[0])/(1/L0.shape[0] + 1/L1.shape[0] + 1/L2.shape[0]) * B2
+                block_matrix[n0+n1:, n0:n0+n1] = (1/L1.shape[0])/(1/L1.shape[0] + 1/L2.shape[0]) * B2.T
+            else:
+                block_matrix[:n0, n0:n0+n1] = B1
+                block_matrix[n0:n0+n1, :n0] = (1/L0.shape[0])/(1/L0.shape[0] + 1/L2.shape[0]) * B1.T
+                block_matrix[n0:n0+n1, n0+n1:] = (1/L2.shape[0])/(1/L0.shape[0] + 1/L2.shape[0]) * B2
+                block_matrix[n0+n1:, n0:n0+n1] = B2.T
         else:
             # Unweighted blocks for unbiased walk
             if self.diagonal:
@@ -377,6 +393,7 @@ class HO_Pre(SpatioTemporalDataset):
             block_matrix[n0:n0+n1, :n0] = B1.T
             block_matrix[n0:n0+n1, n0+n1:] = B2
             block_matrix[n0+n1:, n0:n0+n1] = B2.T
+            
         
         # Apply bias/unbias normalization
         if self.bias and self.norm:

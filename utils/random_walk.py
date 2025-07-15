@@ -12,7 +12,8 @@ def uniform_random_walk(edge_index, edge_weight,
     #flip
     source, target = edge_index[1], edge_index[0]
     dgl_graph = dgl.graph((source, target))
-    nodes = nodes.repeat(batch_size * num_samples * timesteps)
+    # nodes = nodes.repeat(batch_size * num_samples * timesteps)
+    nodes = nodes.repeat(batch_size * num_samples)
 
     if bias_walk:
         dgl_graph.edata["p"] = edge_weight
@@ -22,7 +23,11 @@ def uniform_random_walk(edge_index, edge_weight,
         walks, _ = dgl.sampling.random_walk(dgl_graph, nodes, length=length,
                                             return_eids=False, restart_prob = 0.)
     
-    walks = walks.view(batch_size, num_samples, timesteps, num_nodes, length+1)
+    # walks = walks.view(batch_size, num_samples, timesteps, num_nodes, length+1)
+
+    walks = walks.view(batch_size, num_samples, num_nodes, length+1)
+    walks = walks.unsqueeze(2).repeat(1,1,timesteps,1,1)
+
     # eids = eids.view(batch_size, num_samples, timesteps, num_nodes, length)
     # if directed:
     walks = torch.where(

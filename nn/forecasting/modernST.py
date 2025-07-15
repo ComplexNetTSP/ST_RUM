@@ -67,10 +67,11 @@ class ModernST(nn.Module):
         self.head = nn.Sequential(
             nn.Linear(self.total_features * hidden_size, ff_size),
             get_layer_activation(activation)(),
+            nn.Dropout(dropout),
             nn.Linear(ff_size, horizon)
         )
         
-        self.reset_parameters()
+        # self.reset_parameters()
 
     def reset_parameters(self):
         """Initialize model parameters"""
@@ -167,7 +168,7 @@ class ModernST(nn.Module):
         )  # (batch, samples, time, nodes, length)
         
         # Compute uniqueness features
-        uniqueness_scores = uniqueness(walks).flip(-1)
+        uniqueness_scores = uniqueness(walks)#.flip(-1)
         uniqueness_scores = uniqueness_scores / uniqueness_scores.shape[-1] * 2 * math.pi
         uniqueness_features = torch.cat([
             uniqueness_scores.sin().unsqueeze(-1),
@@ -175,7 +176,9 @@ class ModernST(nn.Module):
         ], dim=-1)
         
         # Gather features along walks
-        gathered_features = self._gather_walk_features(x_concat, walks.flip(-1))
+        gathered_features = self._gather_walk_features(x_concat, walks)#.flip(-1)
+
+        # print(gathered_features[0, :, 0, 0, :])
         
         # Combine with uniqueness features
         x_walks = torch.cat([gathered_features, uniqueness_features], dim=-1)

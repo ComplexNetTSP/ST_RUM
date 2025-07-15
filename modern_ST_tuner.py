@@ -6,7 +6,8 @@ import pandas as pd
 import numpy as np
 import torch
 from pytorch_lightning import Trainer, seed_everything as pl_seed_everything
-from pytorch_lightning.callbacks import EarlyStopping
+from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
+from pytorch_lightning import Callback
 from pytorch_lightning.loggers import TensorBoardLogger
 import optuna
 from optuna.integration import PyTorchLightningPruningCallback
@@ -21,6 +22,12 @@ from nn.forecasting import ModernST
 from nn.imputation import ModernSTImpute
 from utils import str2bool, MaskedRMSE
 from dataset_utils import SDWPE, HO_Pre, HO_Imp
+from tsl.metrics import numpy as numpy_metrics
+from tsl.utils.casting import torch_to_numpy
+from torch.optim.lr_scheduler import CosineAnnealingLR
+
+import warnings
+warnings.filterwarnings("ignore")
 
 
 def get_parser():
@@ -28,7 +35,7 @@ def get_parser():
     parser = argparse.ArgumentParser(description='ModernST Spatial-Temporal Forecasting/Imputation')
 
     # Task configuration
-    parser.add_argument('--task', type=str, default='imputation', choices=['forecasting', 'imputation'],
+    parser.add_argument('--task', type=str, default='forecasting', choices=['forecasting', 'imputation'],
                        help='Task type: forecasting or imputation')
     
     # Random seed
@@ -64,11 +71,6 @@ def get_parser():
                        help='Include diagonal elements in adjacency matrix')
     parser.add_argument('--norm', type=str, default='row', choices=['row', 'col', None],
                        help='Normalization for adjacency matrix')
-    parser.add_argument('--alpha', type=float, default=0.5, 
-                       help='Alpha hyperparameter for biased random walk (0-1)')
-    parser.add_argument('--beta', type=float, default=0.5, 
-                       help='Beta hyperparameter for biased random walk (0-1)')
-    
     # Coordinate configuration
     parser.add_argument('--coord_type', type=str, default='relative', 
                        choices=['relative', 'geographic'],
@@ -78,10 +80,10 @@ def get_parser():
 
     # ModernST model configuration
     parser.add_argument('--input_size', type=int, default=1, help='Input feature dimension')
-    parser.add_argument('--hidden_size', type=int, default=64, help='Hidden dimension')
+    parser.add_argument('--hidden_size', type=int, default=32, help='Hidden dimension')
     parser.add_argument('--exog_size', type=int, default=4, help='Exogenous feature dimension')
     parser.add_argument('--ff_size', type=int, default=128, help='Feed-forward layer size')
-    parser.add_argument('--kernel_sizes', nargs='+', type=int, default=[5, 3], 
+    parser.add_argument('--kernel_sizes', nargs='+', type=int, default=[7, 5, 3], 
                        help='Kernel sizes for backbone blocks')
     parser.add_argument('--spatial_step', type=int, default=2, 
                        help='Diffusion K step')
@@ -101,14 +103,14 @@ def get_parser():
 
     # Training configuration
     parser.add_argument('--num_workers', type=int, default=4, help='Data loader workers')
-    parser.add_argument('--train_epochs', type=int, default=30, help='Maximum training epochs')
-    parser.add_argument('--limit_train_batches', type=int, default=100, 
+    parser.add_argument('--train_epochs', type=int, default=200, help='Maximum training epochs')
+    parser.add_argument('--limit_train_batches', type=int, default=150, 
                        help='Limit training batches per epoch (for debugging)')
     parser.add_argument('--batch_size', type=int, default=16, help='Batch size')
     parser.add_argument('--patience', type=int, default=5, help='Early stopping patience')
     parser.add_argument('--learning_rate', type=float, default=1e-3, help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=0, help='Weight decay')
-    parser.add_argument('--scale_target', type=str2bool, default=False, help='Scale target for loss computation')
+    parser.add_argument('--scale_target', type=str2bool, default=True, help='Scale target for loss computation')
 
     # Hardware configuration
     parser.add_argument('--accelerator', type=str, default='gpu', choices=['gpu', 'cpu'],
@@ -116,7 +118,7 @@ def get_parser():
     parser.add_argument('--devices', type=int, default=0, help='GPU device ID')
 
     # Optuna configuration
-    parser.add_argument('--n_trials', type=int, default=100, help='Number of optimization trials')
+    parser.add_argument('--n_trials', type=int, default=30, help='Number of optimization trials')
     parser.add_argument('--study_name', type=str, default='modernst_tuning', help='Study name')
 
     # Add preset argument
@@ -125,6 +127,10 @@ def get_parser():
                        help='Preset tuning configuration')
 
     return parser
+
+class OptunaPruning(PyTorchLightningPruningCallback, Callback):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
 
 class ModernSTHyperparameterTuner:
@@ -141,7 +147,7 @@ class ModernSTHyperparameterTuner:
             'learning_rate': {
                 'tune': True,
                 'type': 'float',
-                'range': (1e-5, 1e-2),
+                'range': (1e-5, 9e-4),
                 'log': True
             },
             # Model architecture  
@@ -155,28 +161,16 @@ class ModernSTHyperparameterTuner:
             'rw_samples': {
                 'tune': False,  # Disabled as requested
                 'type': 'int',
-                'range': (50, 100),
-                'step': 10
+                'range': (2, 8),
+                'step': 1
             },
             'rw_length': {
                 'tune': False,  # Disabled as requested
                 'type': 'int', 
-                'range': (3, 10)
+                'range': (2, 8),
+                'step': 1
             },
             
-            # Higher-order adjacency parameters
-            'alpha': {
-                'tune': False,  # Disabled as requested
-                'type': 'categorical',
-                'choices': [0.5,0.6,0.7,0.8,0.9],
-                'condition': 'bias_walk'  # Only tune if bias_walk is True
-            },
-            'beta': {
-                'tune': False,  # Disabled as requested
-                'type': 'categorical', 
-                'choices': [0.5,0.6,0.7,0.8,0.9],
-                'condition': 'bias_walk'  # Only tune if bias_walk is True
-            },
         }
         
     def setup_seed(self, seed):
@@ -184,6 +178,8 @@ class ModernSTHyperparameterTuner:
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
+        pl_seed_everything(seed)
+        torch.set_float32_matmul_precision('medium')
         
         try:
             import dgl
@@ -195,11 +191,13 @@ class ModernSTHyperparameterTuner:
         if torch.cuda.is_available():
             torch.cuda.manual_seed(seed)
             torch.cuda.manual_seed_all(seed)
-            torch.set_float32_matmul_precision('medium')
+            torch.set_float32_matmul_precision('medium') 
             torch.backends.cudnn.deterministic = True
-            torch.backends.cudnn.benchmark = True
-            
+            torch.backends.cudnn.benchmark = False
+            torch.use_deterministic_algorithms(True)
+                
         os.environ['PYTHONHASHSEED'] = str(seed)
+        os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
         
     def get_dataset(self, dataset_name, task='forecasting', p_fault=0.0, p_noise=0.0, min_seq=12, max_seq=48):
         """Load dataset by name with optional missing value injection for imputation"""
@@ -213,18 +211,16 @@ class ModernSTHyperparameterTuner:
             dataset = PemsBay(root='./data/bay', mask_zeros=True)
         elif dataset_name == 'aq':
             dataset = AirQuality(root='./data/aq', impute_nans=True, small=False)
-        elif dataset_name == 'aq36':
-            dataset = AirQuality(root='./data/aq36', impute_nans=True, small=True)
         elif dataset_name == 'pv':
             dataset = PvUS(zones="west", freq='30T', mask_zeros=False, root="./data/pvus_west")
             dataset.reduce_(dataset.index < datetime.datetime(2006, 7, 1))
         elif dataset_name == 'largeST':
             dataset = LargeST(subset="sd", mask_zeros=False, root="./data/largeST_sd")
         else:
-            raise ValueError(f"Dataset {dataset_name} not available. Choose from: ['la', 'sdwpe', 'bay', 'aq', 'aq36', 'pv', 'largeST']")
+            raise ValueError(f"Dataset {dataset_name} not available. Choose from: ['la', 'sdwpe', 'bay', 'aq', 'pv', 'largeST']")
         
         # Add missing values for imputation tasks
-        if task == 'imputation' and (p_fault > 0 or p_noise > 0):
+        if task == 'imputation' and (p_fault > 0 or p_noise > 0) and (dataset_name != 'aq'):
             dataset = add_missing_values(
                 dataset,
                 p_fault=p_fault,
@@ -303,8 +299,6 @@ class ModernSTHyperparameterTuner:
                 diagonal=self.args.diagonal,
                 bias=self.args.bias_walk,
                 norm=self.args.norm,
-                alpha=self.args.alpha,
-                beta=self.args.beta,
                 points=self.get_coordinates(self.args.data),
                 coord_type=self.args.coord_type,
                 use_delaunay=self.args.use_delaunay
@@ -326,8 +320,6 @@ class ModernSTHyperparameterTuner:
                 diagonal=self.args.diagonal,
                 bias=self.args.bias_walk,
                 norm=self.args.norm,
-                alpha=self.args.alpha,
-                beta=self.args.beta,
                 points=self.get_coordinates(self.args.data),
                 coord_type=self.args.coord_type,
                 use_delaunay=self.args.use_delaunay,
@@ -351,7 +343,6 @@ class ModernSTHyperparameterTuner:
         connectivity = dataset.get_connectivity(
             threshold=self.args.threshold,
             include_self=False,
-            normalize_axis=1,
             force_symmetric=(not self.args.directed),
             layout="edge_index"
         )
@@ -506,15 +497,15 @@ class ModernSTHyperparameterTuner:
                 },
                 loss_fn=loss_fn,
                 metrics=metrics,
-                scale_target=False
+                scale_target=self.args.scale_target
+                # scheduler_class=CosineAnnealingLR,
+                # scheduler_kwargs={'T_max':50, 'eta_min':1e-5},
             )
         
         elif self.args.task == 'imputation':
             metrics = {
                 'mae': torch_metrics.MaskedMAE(),
-                'mse': torch_metrics.MaskedMSE(),
-                'mre': torch_metrics.MaskedMRE(),
-                'mape': torch_metrics.MaskedMAPE()
+                'mre': torch_metrics.MaskedMRE()
             }
             
             return Imputer(
@@ -526,8 +517,10 @@ class ModernSTHyperparameterTuner:
                 },
                 loss_fn=loss_fn,
                 metrics=metrics,
-                scale_target=False,
+                scale_target=self.args.scale_target,
                 whiten_prob=self.get_param_value('whiten_prob', hyperparams)
+                # scheduler_class=CosineAnnealingLR,
+                # scheduler_kwargs={'T_max':50, 'eta_min':1e-5},
             )
         
         else:
@@ -556,32 +549,45 @@ class ModernSTHyperparameterTuner:
         
         # Setup callbacks
         callbacks = []
-        
-        # Early stopping
+    
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        checkpoint_callback = ModelCheckpoint(
+            monitor='val_mae',
+            mode='min',
+            save_top_k=1,
+            dirpath=f'tunner_checkpoint/{self.args.data}/{self.args.task}/{model.__class__.__name__}/{timestamp}',
+            filename='best-{epoch:02d}-{val_mae:.3f}'
+        )
+
+        callbacks.append(checkpoint_callback)
+
         early_stop_callback = EarlyStopping(
             monitor='val_mae',
             patience=self.args.patience,
             mode='min',
-            min_delta=0.001
+            min_delta=0.0001
         )
         callbacks.append(early_stop_callback)
         
         # Pruning callback for Optuna
-        pruning_callback = PyTorchLightningPruningCallback(trial, monitor="val_mae")
-        callbacks.append(pruning_callback)
+        pruning_callback = OptunaPruning(trial, monitor="val_mae")
+        # callbacks.append(pruning_callback)
         
         # Configure trainer
         trainer = Trainer(
             max_epochs=self.args.train_epochs,
             limit_train_batches=self.args.limit_train_batches,
+            limit_val_batches = 300,
             accelerator=self.args.accelerator,
             devices=[self.args.devices],
             gradient_clip_val=5.0,
-            # callbacks=callbacks,
+            callbacks=callbacks,
             num_sanity_val_steps=0,
-            check_val_every_n_epoch=3,
-            enable_progress_bar=False,  # Reduce noise during tuning
+            check_val_every_n_epoch=2,
+            enable_progress_bar=True,  # Reduce noise during tuning
+            enable_model_summary=False,
             logger=False,  # Disable logging for trials
+            # precision='16-mixed',
         )
         
         try:
@@ -590,22 +596,43 @@ class ModernSTHyperparameterTuner:
             
             # Test model
             engine.freeze()
-            trainer.test(ckpt_path="best", dataloaders=datamodule.test_dataloader())
+            # trainer.test(ckpt_path="best", dataloaders=datamodule.test_dataloader())
+
+            test_outputs = trainer.predict(engine, 
+                                           ckpt_path=checkpoint_callback.best_model_path, 
+                                           dataloaders=datamodule.test_dataloader())
+            collated_outputs = engine.collate_prediction_outputs(test_outputs)
+            collated_outputs = torch_to_numpy(collated_outputs)
+
+            y_hat = collated_outputs['y_hat']
+            y_true = collated_outputs['y']
+            
+            if self.args.task == 'imputation':
+                # For imputation, use eval_mask
+                eval_mask = collated_outputs.get('eval_mask', None)
+                mae = numpy_metrics.mae(y_hat, y_true, eval_mask)
+            else:
+                # For forecasting, use mask if available
+                mask = collated_outputs.get('mask', None)
+                mae = numpy_metrics.mae(y_hat, y_true, mask)
             
             # Get test results
-            test_mae = trainer.callback_metrics["test_mae"].item()
-            test_rmse = trainer.callback_metrics.get("test_rmse", torch.tensor(float('inf'))).item()
+            # test_mae = trainer.callback_metrics["test_mae"].item()
+            # test_rmse = trainer.callback_metrics.get("test_rmse", torch.tensor(float('inf'))).item()
+            # best_val_mae = checkpoint_callback.best_model_score.item()
+            # val_mae = trainer.callback_metrics["val_mae"].item()
+            # val_rmse = trainer.callback_metrics["val_rmse"].item()
             
             # Log trial results
-            self.log_trial_result(trial, hyperparams, test_mae, test_rmse)
+            self.log_trial_result(trial, hyperparams, mae)
             
-            return test_mae
+            return mae
             
         except Exception as e:
             print(f"Trial {trial.number} failed with error: {e}")
             return float('inf')
     
-    def log_trial_result(self, trial, hyperparams, test_mae, test_rmse):
+    def log_trial_result(self, trial, hyperparams, test_mae):
         """Log individual trial results"""
         results_dir = f'optuna_results/{self.args.data}/{self.args.task}/{self.args.study_name}'
         os.makedirs(results_dir, exist_ok=True)
@@ -613,7 +640,6 @@ class ModernSTHyperparameterTuner:
         with open(f'{results_dir}/trial_results.txt', 'a') as f:
             f.write(f"Trial {trial.number}:\n")
             f.write(f"  Test MAE: {test_mae:.4f}\n")
-            f.write(f"  Test RMSE: {test_rmse:.4f}\n")
             f.write(f"  Hyperparameters:\n")
             for key, value in hyperparams.items():
                 f.write(f"    {key}: {value}\n")
@@ -633,7 +659,13 @@ class ModernSTHyperparameterTuner:
             direction="minimize",
             study_name=f"{self.args.study_name}_{self.args.task}",
             load_if_exists=True,
-            sampler=optuna.samplers.TPESampler(seed=self.args.random_seed)
+            # pruner=optuna.pruners.MedianPruner(n_startup_trials = 10,
+            #                                    n_warmup_steps = 50,
+            #                                    interval_steps = 1),
+            sampler=optuna.samplers.TPESampler(seed=self.args.random_seed,
+                                               n_startup_trials = 8,
+                                               n_ei_candidates = 20,
+                                               multivariate = True)
         )
         
         # Initialize results file
@@ -652,7 +684,7 @@ class ModernSTHyperparameterTuner:
             f.write("=" * 60 + "\n\n")
         
         # Run optimization
-        study.optimize(self.objective, n_trials=self.args.n_trials, n_jobs = 2)
+        study.optimize(self.objective, n_trials=self.args.n_trials, n_jobs = 1)
         
         # Save final results
         self.save_final_results(study, results_dir)
@@ -727,11 +759,9 @@ def quick_tune_setup(tuner, preset='minimal'):
         # Only tune learning rate and weight decay (fastest)
         tuner.set_tuning_config(
             learning_rate=True,
-            hidden_size=True,
+            hidden_size=False,
             rw_samples=False,
             rw_length=False,
-            alpha=True,
-            beta=True
         )
     
     elif preset == 'architecture':
@@ -741,8 +771,6 @@ def quick_tune_setup(tuner, preset='minimal'):
             hidden_size=True,
             rw_samples=False,
             rw_length=False,
-            alpha=False,
-            beta=False
         )
     
     elif preset == 'random_walk':
@@ -751,9 +779,7 @@ def quick_tune_setup(tuner, preset='minimal'):
             learning_rate=True,
             hidden_size=False,
             rw_samples=True,
-            rw_length=True,
-            alpha=False,
-            beta=False
+            rw_length=True
         )
 
     
@@ -764,19 +790,15 @@ def quick_tune_setup(tuner, preset='minimal'):
             learning_rate=True,
             hidden_size=True,
             rw_samples=True,
-            rw_length=True,
-            alpha=True,
-            beta=True
+            rw_length=True
         )
     elif preset == 'custom':
         # Tune everything available
         tuner.set_tuning_config(
             learning_rate=False,
-            hidden_size=True,
+            hidden_size=False,
             rw_samples=True,
-            rw_length=True,
-            alpha=True,
-            beta=True
+            rw_length=True
         )
 
 

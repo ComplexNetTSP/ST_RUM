@@ -20,8 +20,11 @@ from tsl.transforms import MaskInput
 
 from nn.forecasting import ModernST
 from nn.imputation import ModernSTImpute
-from utils import str2bool, MaskedRMSE
+from utils import str2bool, MaskedRMSE, TimingCallback
 from dataset_utils import SDWPE, HO_Pre, HO_Imp
+from tsl.utils.casting import torch_to_numpy
+from tsl.metrics import numpy as numpy_metrics
+from torch.optim.lr_scheduler import CosineAnnealingLR, MultiStepLR
 
 
 def get_parser():
@@ -29,7 +32,7 @@ def get_parser():
     parser = argparse.ArgumentParser(description='ModernST Spatial-Temporal Forecasting/Imputation')
 
     # Task configuration
-    parser.add_argument('--task', type=str, default='imputation', choices=['forecasting', 'imputation'],
+    parser.add_argument('--task', type=str, default='forecasting', choices=['forecasting', 'imputation'],
                        help='Task type: forecasting or imputation')
     
     # Random seed
@@ -65,11 +68,6 @@ def get_parser():
                        help='Include diagonal elements in adjacency matrix')
     parser.add_argument('--norm', type=str, default='row', choices=['row', 'col', None],
                        help='Normalization for adjacency matrix')
-    parser.add_argument('--alpha', type=float, default=0.5, 
-                       help='Alpha hyperparameter for biased random walk (0-1)')
-    parser.add_argument('--beta', type=float, default=0.5, 
-                       help='Beta hyperparameter for biased random walk (0-1)')
-    
     # Coordinate configuration
     parser.add_argument('--coord_type', type=str, default='relative', 
                        choices=['relative', 'geographic'],
@@ -79,10 +77,10 @@ def get_parser():
 
     # ModernST model configuration
     parser.add_argument('--input_size', type=int, default=1, help='Input feature dimension')
-    parser.add_argument('--hidden_size', type=int, default=64, help='Hidden dimension')
+    parser.add_argument('--hidden_size', type=int, default=32, help='Hidden dimension')
     parser.add_argument('--exog_size', type=int, default=4, help='Exogenous feature dimension')
     parser.add_argument('--ff_size', type=int, default=128, help='Feed-forward layer size')
-    parser.add_argument('--kernel_sizes', nargs='+', type=int, default=[5, 3], 
+    parser.add_argument('--kernel_sizes', nargs='+', type=int, default=[7, 5, 3], 
                        help='Kernel sizes for backbone blocks')
     parser.add_argument('--spatial_step', type=int, default=2, 
                        help='Diffusion K step')
@@ -101,7 +99,7 @@ def get_parser():
                        help='Probability of whitening training data (imputation)')
     parser.add_argument('--prediction_loss_weight', type=float, default=1.0,
                        help='Weight for prediction loss in imputation')
-    parser.add_argument('--impute_only_missing', type=str2bool, default=True,
+    parser.add_argument('--impute_only_missing', type=str2bool, default=False,
                        help='Impute only missing values or full sequence')
     parser.add_argument('--warm_up_steps', type=int, default=0,
                        help='Warm-up steps for imputation')
@@ -112,10 +110,10 @@ def get_parser():
     parser.add_argument('--limit_train_batches', type=int, default=150, 
                        help='Limit training batches per epoch (for debugging)')
     parser.add_argument('--batch_size', type=int, default=16, help='Batch size')
-    parser.add_argument('--patience', type=int, default=5, help='Early stopping patience')
-    parser.add_argument('--learning_rate', type=float, default=1e-3, help='Learning rate')
-    parser.add_argument('--weight_decay', type=float, default=0, help='Weight decay')
-    parser.add_argument('--scale_target', type=str2bool, default=False, help='Scale target for loss computation')
+    parser.add_argument('--patience', type=int, default=12, help='Early stopping patience')
+    parser.add_argument('--learning_rate', type=float, default=1e-2, help='Learning rate')
+    parser.add_argument('--weight_decay', type=float, default=1e-5, help='Weight decay')
+    parser.add_argument('--scale_target', type=str2bool, default=True, help='Scale target for loss computation')
 
     # Hardware configuration
     parser.add_argument('--accelerator', type=str, default='gpu', choices=['gpu', 'cpu'],
@@ -176,7 +174,7 @@ def get_dataset(dataset_name, task='forecasting', p_fault=0.0, p_noise=0.0, min_
         raise ValueError(f"Dataset {dataset_name} not available. Choose from: ['la', 'sdwpe', 'bay', 'aq', 'aq36', 'pv', 'largeST']")
     
     # Add missing values for imputation tasks
-    if task == 'imputation' and (p_fault > 0 or p_noise > 0):
+    if task == 'imputation' and (p_fault > 0 or p_noise > 0) and (dataset_name != 'aq'):
         print(f"Adding missing values: p_fault={p_fault}, p_noise={p_noise}")
         dataset = add_missing_values(
             dataset,
@@ -260,8 +258,6 @@ def create_dataset(args, dataset, connectivity, covariates):
             diagonal=args.diagonal,
             bias=args.bias_walk,
             norm=args.norm,
-            alpha=args.alpha,
-            beta=args.beta,
             points=get_coordinates(args.data),
             coord_type=args.coord_type,
             use_delaunay=args.use_delaunay
@@ -283,8 +279,6 @@ def create_dataset(args, dataset, connectivity, covariates):
             diagonal=args.diagonal,
             bias=args.bias_walk,
             norm=args.norm,
-            alpha=args.alpha,
-            beta=args.beta,
             points=get_coordinates(args.data),
             coord_type=args.coord_type,
             use_delaunay=args.use_delaunay,
@@ -345,37 +339,39 @@ def create_engine(args, model):
     
     # Common loss and metrics
     loss_fn = torch_metrics.MaskedMAE()
+
+    # loss_fn = torch_metrics.MaskedMSE()
     
     if args.task == 'forecasting':
         metrics = {
             'mae': torch_metrics.MaskedMAE(),
-            'rmse': MaskedRMSE(),
-            'mae_step_2': torch_metrics.MaskedMAE(at=2),
-            'mae_step_6': torch_metrics.MaskedMAE(at=5),
-            'mae_step_12': torch_metrics.MaskedMAE(at=11),
-            'rmse_step_2': MaskedRMSE(at=2),
-            'rmse_step_6': MaskedRMSE(at=5),
-            'rmse_step_12': MaskedRMSE(at=11)
+            'rmse': MaskedRMSE()
+            # 'mae_step_2': torch_metrics.MaskedMAE(at=2),
+            # 'mae_step_6': torch_metrics.MaskedMAE(at=5),
+            # 'mae_step_12': torch_metrics.MaskedMAE(at=11),
+            # 'rmse_step_2': MaskedRMSE(at=2),
+            # 'rmse_step_6': MaskedRMSE(at=5),
+            # 'rmse_step_12': MaskedRMSE(at=11)
         }
         
         return Predictor(
             model=model,
-            optim_class=torch.optim.Adam,
+            optim_class=torch.optim.AdamW,
             optim_kwargs={
                 'lr': args.learning_rate,
                 'weight_decay': args.weight_decay
             },
             loss_fn=loss_fn,
             metrics=metrics,
-            scale_target=args.scale_target
+            scale_target=args.scale_target,
+            scheduler_class = MultiStepLR,
+            scheduler_kwargs={'milestones':[ 25, 50, 100 ], 'gamma':0.1},
         )
     
     elif args.task == 'imputation':
         metrics = {
             'mae': torch_metrics.MaskedMAE(),
-            'mse': torch_metrics.MaskedMSE(),
-            'mre': torch_metrics.MaskedMRE(),
-            'mape': torch_metrics.MaskedMAPE()
+            'mre': torch_metrics.MaskedMRE()
         }
         
         return Imputer(
@@ -391,19 +387,24 @@ def create_engine(args, model):
             whiten_prob=args.whiten_prob,
             prediction_loss_weight=args.prediction_loss_weight,
             impute_only_missing=args.impute_only_missing,
-            warm_up_steps=args.warm_up_steps
+            warm_up_steps=args.warm_up_steps,
+            scheduler_class = MultiStepLR,
+            scheduler_kwargs={'milestones':[ 25, 50, 100 ], 'gamma':0.1},
         )
     
     else:
         raise ValueError(f"Unknown task: {args.task}")
-
+    
 
 def setup_logging_and_checkpoints(args, dataset_name, model):
     """Setup logging and checkpoint callbacks"""
     # Create log directory with task info
-    log_dir = f"logs/{dataset_name}/{args.task}"
-    checkpoint_dir = f'model_checkpoint/{dataset_name}/{args.task}/{model.__class__.__name__}'
-    
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    experiment_name = f"seed{args.random_seed}_{timestamp}"
+    checkpoint_dir = f'model_checkpoint/{dataset_name}/{args.task}/{model.__class__.__name__}/{experiment_name}'
+    log_dir = f"logs/{dataset_name}/{args.task}/{experiment_name}"
+
+
     # TensorBoard logger
     logger = TensorBoardLogger(
         save_dir=log_dir,
@@ -425,12 +426,12 @@ def setup_logging_and_checkpoints(args, dataset_name, model):
 
 def evaluate_results(args, collated_outputs):
     """Evaluate and print results based on task type"""
-    
+
+    collated_outputs = torch_to_numpy(collated_outputs)
     if args.task == 'imputation':
         # For imputation: y_hat, y, mask, eval_mask
         y_hat = collated_outputs['y_hat']
         y_true = collated_outputs['y'] 
-        mask = collated_outputs.get('mask', None)
         eval_mask = collated_outputs.get('eval_mask', None)
         
         print(f"\n=== Imputation Results ===")
@@ -440,18 +441,13 @@ def evaluate_results(args, collated_outputs):
         if eval_mask is not None:
             print(f"Evaluation mask shape: {eval_mask.shape}")
             print(f"Total evaluation points: {eval_mask.sum().item()}")
-            print(f"Evaluation percentage: {eval_mask.float().mean().item():.2%}")
+            print(f"Evaluation percentage: {eval_mask.mean().item():.2%}")
         
         # Calculate imputation-specific metrics
         if eval_mask is not None:
-            from tsl.metrics import numpy as numpy_metrics
-            y_hat_np = y_hat.cpu().numpy()
-            y_true_np = y_true.cpu().numpy()
-            eval_mask_np = eval_mask.cpu().numpy()
-            
-            mae = numpy_metrics.mae(y_hat_np, y_true_np, eval_mask_np)
-            rmse = numpy_metrics.rmse(y_hat_np, y_true_np, eval_mask_np)
-            mre = numpy_metrics.mre(y_hat_np, y_true_np, eval_mask_np)
+            mae = numpy_metrics.mae(y_hat, y_true, eval_mask)
+            rmse = numpy_metrics.rmse(y_hat, y_true, eval_mask)
+            mre = numpy_metrics.mre(y_hat, y_true, eval_mask)
             
             print(f"Final Imputation Metrics:")
             print(f"  MAE: {mae:.4f}")
@@ -473,13 +469,9 @@ def evaluate_results(args, collated_outputs):
             print(f"Valid prediction points: {mask.sum().item()}")
         
         # Calculate forecasting-specific metrics
-        from tsl.metrics import numpy as numpy_metrics
-        y_hat_np = y_hat.cpu().numpy()
-        y_true_np = y_true.cpu().numpy()
-        mask_np = mask.cpu().numpy() if mask is not None else None
         
-        mae = numpy_metrics.mae(y_hat_np, y_true_np, mask_np)
-        rmse = numpy_metrics.rmse(y_hat_np, y_true_np, mask_np)
+        mae = numpy_metrics.mae(y_hat, y_true, mask)
+        rmse = numpy_metrics.rmse(y_hat, y_true, mask)
         
         print(f"Final Forecasting Metrics:")
         print(f"  MAE: {mae:.4f}")
@@ -515,12 +507,9 @@ def experiment(args):
     connectivity = dataset.get_connectivity(
         threshold=args.threshold,
         include_self=False,
-        normalize_axis=1,
         force_symmetric=(not args.directed),
         layout="edge_index"
     )
-    print(f"Connectivity: {connectivity[0].shape[1]} edges")
-
     # Setup covariates
     covariates = {'u': dataset.datetime_encoded('day').values}
 
@@ -564,8 +553,10 @@ def experiment(args):
         monitor='val_mae',
         patience=args.patience,
         mode='min',
-        min_delta=0.001
+        min_delta=0.0001
     )
+
+    time_callback = TimingCallback()
 
     # Configure trainer
     trainer_kwargs = {
@@ -573,10 +564,10 @@ def experiment(args):
         'accelerator': args.accelerator,
         'devices': [args.devices],
         'gradient_clip_val': 5.0,
-        'callbacks': [checkpoint_callback, early_stop_callback],
+        'callbacks': [early_stop_callback, checkpoint_callback, time_callback],
         'logger': False,
         'num_sanity_val_steps': 0,
-        'check_val_every_n_epoch': 3
+        'check_val_every_n_epoch': 2
     }
     
     # Add limit_train_batches if specified
@@ -592,11 +583,13 @@ def experiment(args):
     # Test model
     print(f"\n--- Testing ---")
     engine.freeze()
-    trainer.test(ckpt_path="best", dataloaders=datamodule.test_dataloader())
+    # trainer.test(ckpt_path="best", dataloaders=datamodule.test_dataloader())
     
     # Generate detailed predictions with proper collation
     print(f"\n--- Generating Predictions ---")
-    test_outputs = trainer.predict(engine, dataloaders=datamodule.test_dataloader())
+    test_outputs = trainer.predict(engine,
+                                    ckpt_path=checkpoint_callback.best_model_path,
+                                    dataloaders=datamodule.test_dataloader())
     collated_outputs = engine.collate_prediction_outputs(test_outputs)
     
     # Evaluate and print detailed results

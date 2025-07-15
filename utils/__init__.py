@@ -1,6 +1,7 @@
 from .random_walk import uniform_random_walk, uniqueness
 from .seed import seed_everything
 from .custom_metric import MaskedRMSE
+from .custom_callback import TimingCallback
 import argparse
 
 

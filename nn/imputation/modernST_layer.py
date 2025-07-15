@@ -44,14 +44,15 @@ class BackboneBlockImpute(nn.Module):
         self.num_nodes = num_nodes
         self.num_features = num_features
         self.hidden_size = hidden_size
+        self.dropout = dropout
         
         total_channels = num_features * hidden_size
         
         # Temporal convolution with large kernel
         self.temporal_conv = nn.Sequential(
             DepthwiseLargeKernel(total_channels, kernel_size, groups=total_channels),
-            nn.Dropout(dropout),
-            get_layer_activation(activation)()
+            get_layer_activation(activation)(),
+            # nn.Dropout(dropout)
         )
         
         # Spatial graph convolution
@@ -65,14 +66,14 @@ class BackboneBlockImpute(nn.Module):
         # Pointwise convolutions
         self.pointwise_conv1 = nn.Sequential(
             nn.Conv1d(total_channels, total_channels, kernel_size=1, groups=num_features),
-            nn.Dropout(dropout),
-            get_layer_activation(activation)()
+            get_layer_activation(activation)(),
+            # nn.Dropout(dropout)
         )
         
         self.pointwise_conv2 = nn.Sequential(
             nn.Conv1d(total_channels, total_channels, kernel_size=1, groups=hidden_size),
-            nn.Dropout(dropout),
-            get_layer_activation(activation)()
+            get_layer_activation(activation)(),
+            # nn.Dropout(dropout)
         )
         
         self.layer_norm = nn.LayerNorm([num_nodes, hidden_size])
@@ -116,6 +117,7 @@ class BackboneBlockImpute(nn.Module):
                          b=batch_size, n=num_nodes, f=num_features, h=hidden_size)
         x_out = x_out + x  # Residual connection
         
+        # x_out = F.dropout(x_out, p = self.dropout, training=self.training)
         # Layer normalization
         x_norm = rearrange(x_out, 'b n f h t -> (b t f) n h')
         x_norm = self.layer_norm(x_norm)
