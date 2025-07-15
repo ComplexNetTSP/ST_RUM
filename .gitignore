@@ -30,3 +30,4 @@ sensitivity_analysis_results/*
 
 
 run.py
+*.pdf
