@@ -1,4 +1,4 @@
-# Non-convolutional simplicial complex spatiotemporal analysis
+# Modern Structure-Aware Simplicial Spatiotemporal Neural Network
 
 ## Installation
 
@@ -7,109 +7,25 @@ Install required dependencies:
 pip install -r requirements.txt
 ```
 
-## Run code
+## Dataset
 
+Download SDWPF dataset from https://figshare.com/articles/dataset/SDWPF_dataset/24798654
+
+Other datasets can be found from Torch-Spatiotemporal Library https://torch-spatiotemporal.readthedocs.io/en/latest/index.html
+
+Please place two csv files for SDWPF in `ST_RUM/data/sdwpe/`
+
+## Run Code
+
+Please find the code in `ST_RUM/script`
+
+**For Tuning in SDWPF dataset:**
 ```bash
-python run.py
+python3 modern_ST_tuner.py --random_seed 42 --data sdwpe --task forecasting --exog_size 4 --tune_preset custom --bias_walk False --n_trials 30
 ```
 
-
-
-## Experiment results
-<table>
-  <tr>
-    <th>Model</th>
-    <th colspan="2" align="center">Metr LA</th>
-    <th colspan="2" align="center">AirQuality 36</th>
-      <th colspan="2" align="center">AirQuality Full</th>
-  </tr>
-  <tr>
-    <th></th>
-    <th>MAE</th>
-    <th>MSE</th>
-    <th>MAE</th>
-    <th>MSE</th>
-    <th>MAE</th>
-    <th>MSE</th>
-  </tr>
-  <tr>
-    <td>DCRNN Directed</td>
-    <td>3.18</td>
-    <td>39.67</td>
-    <td>-</td>
-    <td>-</td>
-    <td>-</td>
-    <td>-</td>
-  </tr>
-    <tr>
-    <td>DCRNN Undirected</td>
-    <td>3.27</td>
-    <td>42.04</td>
-    <td>31.96</td>
-    <td>2593.73</td>
-    <td>21.21</td>
-    <td>1414.68</td>
-  </tr>
-  <tr>
-    <td>Graph Wavenet Directed</td>
-    <td>3.16</td>
-    <td>38.88</td>
-    <td>-</td>
-    <td>-</td>
-    <td>-</td>
-    <td>-</td>
-  </tr>
-    <tr>
-    <td>Graph Wavenet undirected</td>
-    <td>3.24</td>
-    <td>41.09</td>
-    <td>30.63</td>
-    <td>2344.78</td>
-    <td>21.07</td>
-    <td>1380.89</td>
-  </tr>
-  <tr>
-    <td>Ours</td>
-    <td>3.83</td>
-    <td>59.78</td>
-    <td>33.12</td>
-    <td>2699.32</td>
-    <td>23.12</td>
-    <td>1558.18</td>
-  </tr>
-</table>
-
-
-
-## Experiment results with Graph Structure
-<table>
-  <tr>
-    <th>Model</th>
-    <th colspan="2" align="center">Metr LA</th>
-  </tr>
-  <tr>
-    <th></th>
-    <th>MAE</th>
-    <th>MSE</th>
-  </tr>
-  <tr>
-    <td>Ours(Nodes + Edges)</td>
-    <td>3.89</td>
-    <td>60.91</td>
-  </tr>
-  <tr>
-    <td>Ours(Directed Graph)</td>
-    <td>3.81</td>
-    <td>59.16</td>
-  </tr>
-  <tr>
-    <td>Ours(Undirected Graph)</td>
-    <td>3.82</td>
-    <td>59.66</td>
-  </tr>
-</table>
-
-<figure>
-  <img src="image/learning_curve.png" alt="Alt text" width="300">
-  <figcaption>Training Learning curve</figcaption>
-</figure>
+**For Running in SDWPF dataset:**
+```bash
+python3 run_ModernST.py --data sdwpe --task forecasting --exog_size 4 --rw_samples 5 --rw_length 4 --bias_walk False --learning_rate 1e-2 --order 2 --random_seed 42
+```
+```
